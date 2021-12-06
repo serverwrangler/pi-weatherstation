@@ -1,0 +1,197 @@
+#!/bin/bash
+#
+#    weather.cwop
+#
+# By: Jay Nugent  WB8TKL
+# Dated: 120908
+# Previous: 120907
+#
+# This script is launched by cron every 5 minutes.
+# It reads the ADS-WS1 weather station via /dev/ttyS0 @ 2400 baud.
+# Parses the received string and builds a string in APRS format.
+# Sends that string to rotate.aprs.net (tcp25) using the 'nc' utility.
+#
+#
+
+# Set to 0 to run quietly under cron (login and data are sent to the APRS-IS server)
+# Set to 1 to run in the forground and output to the screen (nothing is sent to the APRS-IS)
+TEST=0
+
+#
+# --- start locally specific parameters ---
+#XVERS="adc0816 1.0"
+XVERS="ADS-WS1"
+
+# CWOP user ID
+LUSER="EW0985"
+#LUSER="WB8TKL-2"
+
+# latitude
+LLAT="4214.87N"
+
+# longitude
+LLON="08335.11W"
+
+# Correction factor for the barometric pressure.  
+# Adjust as needed for your own altitude.
+# example:  20  -8.6
+BAROFIX=20
+
+# Serial port that ADS-WS1 is attached to
+PORT=/dev/ttyS0
+
+#--- end locally specific parameters ---
+
+# Set up serial port
+/bin/stty -F $PORT 2400 raw cs8 -echo -ignpar -cstopb
+
+#==================================================
+#     M A I N    L O O P
+#==================================================
+while true; do
+
+# Read the date string from the serial port
+  read ADSWS1 < $PORT
+  ADSWS1="${ADSWS1#!!}" # strip !! chars
+  ADSLEN=${#ADSWS1} # get string length
+
+# Check for correct length
+  if ((ADSLEN == 49)); then
+  # Continue with the report
+  # else is near the bottom of this script..........
+
+# UTC date
+DDAY=`date -u +%d%H%M`
+
+#==================================================
+# Parse the $ADSWS1 data string and build a set of 
+# formatted variables that we can use later
+#==================================================
+
+  LTEMP=$(printf "%003d" $(echo "$[0x${ADSWS1:8:4}] * 0.1" | bc)) # integer result
+   ### * 0.1"
+   ### %.0f
+
+#-----
+
+  LHUMID=$(printf "%02i" $(echo "$[0x${ADSWS1:24:4}] * 0.1" | bc))
+   
+   ### if 100% then set it to 00 (field is 2 chars)
+
+#-----
+
+  PRESMB=$(printf "%.1f" $(echo "$[0x${ADSWS1:16:4}] * 0.1" | bc)) # pressure in millibars
+  # Add a correction factor for your site's altitude
+  PRESCOR=$(printf "%.1f" $(echo "$PRESMB+$BAROFIX" | bc)) # corrected pressure (mb)
+  LBARO=$(printf "%00005i" $(echo "$PRESCOR * 10" | bc))   # multiplied by 10
+
+#-----
+
+  KPH=$(printf "%.1f" $(echo "$[0x${ADSWS1:0:4}] * 0.1" | bc)) # wind speed in Kilometers/Hr
+  MPH=$(printf "%.1f" $(echo "$KPH * 0.621371" | bc)) # floating point result
+  LWSPEED=$(printf "%003i" $(echo "$KPH * 0.621371" | bc)) # integer result in MPH
+
+#-----
+
+  # Wind dir calculated in degrees
+  LWDIR=$(printf "%003i" $(echo "$[0x${ADSWS1:6:2}] * 1.411764" | bc))
+
+#-----
+
+# wind gust MPH (last 5 minutes)
+LWGUST="..."
+
+#-----
+# rain, last 24 hours
+  LRAIN24=$(printf "%003i" $(echo "$[0x${ADSWS1:40:4}] * 1" | bc))
+
+#-----
+
+# rain, last hour (in 100'ths of inches)
+LRAIN="..."
+
+#-----
+
+# rain, since local (!) midnight
+LRAINM="..."
+
+
+#========================================
+# Assemble into APRS format
+#========================================
+
+CWOPU="user ${LUSER} pass -1 vers ${XVERS}\r\n"
+
+CWOPD="${LUSER}>APRS,TCPXX*:\
+@${DDAY}\
+z${LLAT}/${LLON}\
+_${LWDIR}/${LWSPEED}g${LWGUST}\
+t${LTEMP}\
+r${LRAIN}p${LRAIN24}P${LRAINM}\
+h${LHUMID}b${LBARO}\
+L....\
+nuge.com/~weather\r\n"
+
+###$XVERS\r\n"
+
+###DsIP-VP\r\n"
+
+#========================================
+# Send to the APRS-IS via the Internet
+#========================================
+
+if ((TEST == 0)); then
+   # (for more servers, see http://www.aprs-is.net/APRSServers.htm )
+   echo -e ${CWOPU}${CWOPD} | nc -w 600 -i 3 cwop.aprs.net telnet
+fi
+
+#========================================
+# Or if the TEST flag is set, just output
+# to the screen and do not send to APRS-IS
+#========================================
+
+if ((TEST == 1)); then
+# ...do the following for testing...
+   echo " "
+   echo " "
+   echo "   What we received from the ADS-WS1 via the serial port:"
+   echo $ADSWS1
+   echo " "
+   echo "   Values that were parsed and formatted:"
+   echo 'ddhhmm (UTC)        @  : '$DDAY
+   echo 'Lat & Lon           z  : '$LLAT'/'$LLON
+   echo 'Wind Direction      _  : '$LWDIR' Deg'
+   echo 'Wind Speed          /  : '$LWSPEED' MPH   '
+   echo 'Wind Gust (5min)    g  : ...'
+   echo 'Temperature         t  : '$LTEMP' F   '
+   echo '1-hour Rainfall     r  : ...'
+   echo 'Daily Rainfall      p  : '$LRAIN24' inches'
+   echo 'Rain since Midnight P  : ...'
+   echo 'Humidity            h  : '$LHUMID' %'
+   echo 'Pressure            b  : '$LBARO' MilliBars'
+   echo '  ????              L  : ....'
+   echo 'Station Hardware       : '$XVERS
+   echo " "
+   echo "   What we will send to the CWOP collector:"
+   echo -e ${CWOPU}${CWOPD}
+   echo " "
+#
+fi
+
+# We run only once... so exit cleanly...
+exit 0
+
+#==================================================
+   else
+      echo " "
+      echo "String received was wrong length - $ADSLEN"
+   fi
+#
+done
+exit 0
+#
+# --- exit ---
+#
+#
+
+

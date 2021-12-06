@@ -1,0 +1,207 @@
+#!/bin/bash
+#
+#    weather.wunderground
+#
+# By: Jay Nugent  WB8TKL
+# Dated: 120923
+# Previous: 120918
+#
+# This script is launched by cron every 5 minutes.
+# It reads the ADS-WS1 weather station via /dev/ttyS0 @ 2400 baud.
+# Parses the received string and builds a string in WUNDERGROUND format.
+# Sends that string to weatherstation.wunderground.com via the WGET utility.
+#
+#
+
+# Set to 0 to run quietly under cron (login and data are sent to the WUNDERGROUND server)
+# Set to 1 to run in the forground and output to the screen (nothing is sent to WUNDERGROUND)
+TEST=0
+
+#
+# --- start of locally specific parameters ---
+XVERS="ADS-WS1%20bash%20script"
+
+# WUNDERGROUND user ID
+LUSER="KMIYPSIL10"
+
+# WUNDERGROUND password
+LPASS="oohnoo111"
+
+# Correction factor for the barometric pressure.  
+# Adjust as needed for your own altitude.
+# example:  20  -8.6
+BAROFIX=20
+
+# Serial port that ADS-WS1 is attached to
+PORT=/dev/ttyS0
+
+#--- end locally specific parameters ---
+
+# Set up serial port
+/bin/stty -F $PORT 2400 raw cs8 -echo -ignpar -cstopb
+
+#==================================================
+#     M A I N    L O O P
+#==================================================
+while true; do
+
+# Read the date string from the serial port
+  read ADSWS1 < $PORT
+  ADSWS1="${ADSWS1#!!}" # strip !! chars
+  ADSLEN=${#ADSWS1} # get string length
+
+# Check for correct length
+  if ((ADSLEN == 49)); then
+  # Continue with the report
+  # else is near the bottom of this script..........
+
+# UTC date
+# format:  dateutc - [YYYY-MM-DD HH:MM:SS (mysql format)] 
+# example: 2000-01-01+10%3A32%3A35
+DDAY=`date -u +%Y-%m-%d"+"%H":"%M":"%S`
+
+#==================================================
+# Parse the $ADSWS1 data string and build a set of 
+# formatted variables that we can use later
+#==================================================
+
+  TEMPFLT=$(printf "%.1f" $(echo "$[0x${ADSWS1:8:4}] * 0.1" | bc)) # floating point result
+  TEMPDEC=$(printf "%.0f" $(echo "$[0x${ADSWS1:8:4}] * 0.1" | bc)) # integer result
+
+#-----
+
+  HUMIDITY=$(printf "%.0f" $(echo "$[0x${ADSWS1:24:4}] * 0.1" | bc))
+   
+#-----
+
+  DEWPOINT=$(printf "%0.f" $(echo "$TEMPDEC - (9 * (100 - $HUMIDITY))/25" | bc))
+
+#-----
+
+  PRESMB=$(printf "%.1f" $(echo "$[0x${ADSWS1:16:4}] * 0.1" | bc)) # pressure in millibars
+  # Add a correction factor for your site's altitude
+  PRESCOR=$(printf "%.1f" $(echo "$PRESMB+$BAROFIX" | bc)) # corrected pressure (mb)
+  # 1 millibar = 0.0295333727 inHg
+  INHG=$(printf "%.2f" $(echo "$PRESCOR * 0.0295333727" | bc)) # corrected pres in inches of Hg
+
+###  LBARO=$(printf "%00005i" $(echo "$PRESCOR * 10" | bc))   # multiplied by 10
+
+#-----
+
+  KPH=$(printf "%.1f" $(echo "$[0x${ADSWS1:0:4}] * 0.1" | bc)) # wind speed in Kilometers/Hr
+  MPH=$(printf "%.1f" $(echo "$KPH * 0.621371" | bc)) # floating point result
+  LWSPEED=$(printf "%003i" $(echo "$KPH * 0.621371" | bc)) # integer result in MPH
+
+#-----
+
+  # Wind dir calculated in degrees
+  LWDIR=$(printf "%003i" $(echo "$[0x${ADSWS1:6:2}] * 1.411764" | bc))
+
+#-----
+
+# wind gust MPH (last 5 minutes)
+LWGUST="..."
+
+#-----
+# rain, last 24 hours
+  LRAIN24=$(printf "%003i" $(echo "$[0x${ADSWS1:40:4}] * 1" | bc))
+
+#-----
+
+# rain, last hour (in 100'ths of inches)
+LRAIN="..."
+
+#-----
+
+# rain, since local (!) midnight
+LRAINM="..."
+
+
+#========================================
+# Assemble into WUNDERGROUND format
+#========================================
+
+### rainin - [rain in]
+###dailyrainin - [daily rain in accumulated]
+
+
+WUREPORT="\
+ID=${LUSER}\
+&PASSWORD=${LPASS}\
+&dateutc=${DDAY}\
+&tempf=${TEMPFLT}\
+&humidity=${HUMIDITY}\
+&dewptf=${DEWPOINT}\
+&baromin=${INHG}\
+&winddir=${LWDIR}\
+&windspeedmph=${LWSPEED}\
+&dailyrainin=${LRAIN24}\
+&softwaretype=${XVERS}\
+&action=updateraw"
+
+### leftovers.........
+##&windgustmph=\
+##&rainin=\
+##&weather=\
+##&clouds=\
+
+
+#========================================
+# Send to the WUNDERGROUND server
+#========================================
+
+if ((TEST == 0)); then
+   # -nv non-verbose, -O - output to STDOUT instead of to a file
+   wget -nv -O - "http://weatherstation.wunderground.com/weatherstation/updateweatherstation.php?${WUREPORT}"
+fi
+
+
+#=============================================
+# Or if the TEST flag is set, just output to 
+# the screen and do not send to WUNDERGROUND
+#=============================================
+
+if ((TEST == 1)); then
+# ...do the following for testing...
+   echo " "
+   echo " "
+   echo "   What we received from the ADS-WS1 via the serial port:"
+   echo $ADSWS1
+   echo " "
+   echo "   Values that were parsed and formatted:"
+   echo 'YYYYMMDD HH:MM:SS (UTC)        dateutc : '$DDAY
+   echo 'Wind Direction                 winddir : '$LWDIR' Deg'
+   echo 'Wind Speed                windspeedmph : '$LWSPEED' MPH   '
+   echo 'Wind Speed (2min avg) windspdmph_avg2m : -none-'
+   echo 'Wind Gust (5min)          windgustmph  : -none-'
+   echo 'Temperature                      tempf : '$TEMPFLT' F   '
+   echo '1-hour Rainfall                 rainin : -none-'
+   echo 'Daily Rainfall             dailyrainin : '$LRAIN24' inches'
+   echo 'Humidity                      humidity : '$HUMIDITY' %'
+   echo 'Dew Point                       dewptf : '$DEWPOINT' F  '
+   echo 'Pressure                       baromin : '$INHG' inHG '
+   echo 'Station Hardware                       : '$XVERS
+   echo " "
+   echo "   What we will send to the WUNDERGROUND collector:"
+   echo -e ${WUREPORT}
+   echo " "
+#
+fi
+
+# We run only once... so exit cleanly...
+exit 0
+
+#==================================================
+   else
+      echo " "
+      echo "String received was wrong length - $ADSLEN"
+   fi
+#
+done
+exit 0
+#
+# --- exit ---
+#
+#
+
+
