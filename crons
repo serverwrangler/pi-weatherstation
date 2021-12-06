@@ -1,0 +1,13 @@
+#==========================================================
+#     
+#  0-59  0-23      1-31        1-12     1=Monday
+#==========================================================
+#
+# Send Weather report to CWOP/NOAA via APRS
+00,05,10,15,20,25,30,35,40,34,50,55 * * * * ~/weather.cwop 2>> weather.err
+#
+# Send Weather report to WUNDERGROUND
+00,05,10,15,20,25,30,35,40,45,50,55 * * * * ~/weather.wunderground 2>> weather.err
+#
+# -end-
+#
